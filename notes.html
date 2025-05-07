@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Текстовый редактор (Похоже на Microsoft Word) с IndexedDB</title>
+  <style>
+    body, html {
+      margin: 0; padding: 0; height: 100%;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f3f3f3;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      background: #0078d7;
+      color: white;
+      padding: 12px 20px;
+      font-size: 1.5rem;
+      font-weight: 600;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    header .status {
+      font-size: 0.9rem;
+      opacity: 0.8;
+    }
+    /* Инструменты (лента, ribbon) */
+    #toolbar {
+      background: white;
+      padding: 6px 10px;
+      box-shadow: inset 0 -1px 0 #ddd;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      user-select: none;
+    }
+    #toolbar button, #toolbar select {
+      background: white;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      padding: 6px 10px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.3s, border-color 0.3s;
+    }
+    #toolbar button:hover, #toolbar select:hover {
+      background: #e6f0ff;
+      border-color: #0078d7;
+    }
+    #toolbar button:active {
+      background: #cce0ff;
+    }
+    /* Иконки из Unicode для простоты */
+    button.bold::before { content: "𝐁"; font-weight: bold; }
+    button.italic::before { content: "𝘐"; font-style: italic; }
+    button.underline::before { content: "U"; text-decoration: underline; }
+    button.save::before { content: "💾"; }
+    button.clear::before { content: "🗑️"; }
+    /* Редактор текста */
+    #editor {
+      flex-grow: 1;
+      margin: 10px 20px 20px 20px;
+      background: white;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 20px;
+      font-size: 1.1rem;
+      line-height: 1.5;
+      overflow-y: auto;
+      outline: none;
+      box-shadow: 0 2px 8px rgb(0 0 0 / 0.1);
+      max-height: calc(100vh - 140px);
+    }
+    /* Стили выделения toolbar кнопок активных */
+    #toolbar button.active {
+      background: #0078d7;
+      color: white;
+      border-color: #005a9e;
+    }
+
+    /* Мобильная адаптивность */
+    @media (max-width: 600px) {
+      header {
+        font-size: 1.2rem;
+        padding: 10px;
+      }
+      #toolbar {
+        gap: 6px;
+        padding: 4px 8px;
+      }
+      #toolbar button, #toolbar select {
+        padding: 5px 8px;
+        font-size: 0.9rem;
+      }
+      #editor {
+        margin: 8px 10px 12px 10px;
+        font-size: 1rem;
+        max-height: calc(100vh - 120px);
+        padding: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    Текстовый редактор
+    <div class="status" id="saveStatus">Статус: Не сохранено</div>
+  </header>
+
+  <nav id="toolbar" aria-label="Панель инструментов">
+    <button type="button" id="boldBtn" class="bold" aria-label="Жирный (Ctrl+B)" title="Жирный (Ctrl+B)"></button>
+    <button type="button" id="italicBtn" class="italic" aria-label="Курсив (Ctrl+I)" title="Курсив (Ctrl+I)"></button>
+    <button type="button" id="underlineBtn" class="underline" aria-label="Подчёркнутый (Ctrl+U)" title="Подчёркнутый (Ctrl+U)"></button>
+    <select id="fontSelect" aria-label="Выбор шрифта" title="Выбор шрифта">
+      <option value="Segoe UI" selected>Segoe UI</option>
+      <option value="Arial">Arial</option>
+      <option value="Tahoma">Tahoma</option>
+      <option value="Georgia">Georgia</option>
+      <option value="Courier New">Courier New</option>
+    </select>
+    <select id="fontSizeSelect" aria-label="Размер шрифта" title="Размер шрифта">
+      <option value="1">10pt</option>
+      <option value="2">13pt</option>
+      <option value="3" selected>16pt</option>
+      <option value="4">18pt</option>
+      <option value="5">24pt</option>
+      <option value="6">32pt</option>
+      <option value="7">48pt</option>
+    </select>
+    <button type="button" id="saveBtn" class="save" aria-label="Сохранить" title="Сохранить"></button>
+    <button type="button" id="clearBtn" class="clear" aria-label="Очистить" title="Очистить"></button>
+  </nav>
+
+  <main>
+    <article id="editor" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="true" aria-label="Редактор текста">
+      <p>Начните писать здесь...</p>
+    </article>
+  </main>
+
+  <script>
+    (() => {
+      const editor = document.getElementById('editor');
+      const boldBtn = document.getElementById('boldBtn');
+      const italicBtn = document.getElementById('italicBtn');
+      const underlineBtn = document.getElementById('underlineBtn');
+      const fontSelect = document.getElementById('fontSelect');
+      const fontSizeSelect = document.getElementById('fontSizeSelect');
+      const saveBtn = document.getElementById('saveBtn');
+      const clearBtn = document.getElementById('clearBtn');
+      const saveStatus = document.getElementById('saveStatus');
+
+      let db;
+      const DB_NAME = 'WordLikeEditorDB';
+      const DB_STORE = 'docs';
+      const DB_VERSION = 1;
+      const DOC_KEY = 'document';
+
+      // Открываем IndexedDB или создаём ее
+      function openDB() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+          request.onerror = event => reject('Ошибка при открытии базы данных: ' + event.target.errorCode);
+
+          request.onupgradeneeded = event => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(DB_STORE)) {
+              db.createObjectStore(DB_STORE, { keyPath: 'id' });
+            }
+          };
+
+          request.onsuccess = event => {
+            db = event.target.result;
+            resolve(db);
+          };
+        });
+      }
+
+      // Загрузка документа из IndexedDB
+      function loadDoc() {
+        return new Promise((resolve, reject) => {
+          const transaction = db.transaction(DB_STORE, 'readonly');
+          const store = transaction.objectStore(DB_STORE);
+          const request = store.get(DOC_KEY);
+
+          request.onerror = () => reject('Ошибка при загрузке документа');
+          request.onsuccess = () => {
+            if(request.result && request.result.content){
+              resolve(request.result.content);
+            } else {
+              resolve(null);
+            }
+          };
+        });
+      }
+
+      // Сохранение документа в IndexedDB
+      function saveDoc(content) {
+        return new Promise((resolve, reject) => {
+          const transaction = db.transaction(DB_STORE, 'readwrite');
+          const store = transaction.objectStore(DB_STORE);
+          const data = { id: DOC_KEY, content };
+          const request = store.put(data);
+
+          request.onerror = () => reject('Ошибка при сохранении документа');
+          request.onsuccess = () => resolve();
+        });
+      }
+
+      // Обновление активного состояния кнопок форматирования
+      function refreshToolbarStatus() {
+        document.queryCommandState('bold') ? boldBtn.classList.add('active') : boldBtn.classList.remove('active');
+        document.queryCommandState('italic') ? italicBtn.classList.add('active') : italicBtn.classList.remove('active');
+        document.queryCommandState('underline') ? underlineBtn.classList.add('active') : underlineBtn.classList.remove('active');
+
+        // Установка значения font name
+        try {
+          const fontName = document.queryCommandValue('fontName').replace(/['"]/g, '');
+          if (fontName) fontSelect.value = fontName;
+        } catch {}
+
+        // Установка значения font size
+        try {
+          const fontSize = document.queryCommandValue('fontSize');
+          if (fontSize) fontSizeSelect.value = fontSize;
+        } catch {}
+      }
+
+      // Инициализация редактора
+      async function init() {
+        try {
+          await openDB();
+          const content = await loadDoc();
+          if(content){
+            editor.innerHTML = content;
+            saveStatus.textContent = 'Статус: Документ загружен';
+          }
+        } catch (error) {
+          saveStatus.textContent = error;
+        }
+      }
+
+      // Установка обработчиков кнопок форматирования
+      boldBtn.addEventListener('click', () => {
+        document.execCommand('bold');
+        refreshToolbarStatus();
+      });
+      italicBtn.addEventListener('click', () => {
+        document.execCommand('italic');
+        refreshToolbarStatus();
+      });
+      underlineBtn.addEventListener('click', () => {
+        document.execCommand('underline');
+        refreshToolbarStatus();
+      });
+
+      fontSelect.addEventListener('change', () => {
+        document.execCommand('fontName', false, fontSelect.value);
+        refreshToolbarStatus();
+      });
+
+      fontSizeSelect.addEventListener('change', () => {
+        document.execCommand('fontSize', false, fontSizeSelect.value);
+        refreshToolbarStatus();
+      });
+
+      saveBtn.addEventListener('click', async () => {
+        try {
+          await saveDoc(editor.innerHTML);
+          saveStatus.textContent = 'Статус: Документ сохранён';
+          setTimeout(() => saveStatus.textContent = 'Статус: Все изменения сохранены', 2000);
+        } catch (e) {
+          saveStatus.textContent = 'Ошибка сохранения: ' + e;
+        }
+      });
+
+      clearBtn.addEventListener('click', () => {
+        if(confirm('Вы действительно хотите очистить весь текст? Данные не будут сохранены, если вы не нажмёте "Сохранить".')){
+          editor.innerHTML = '<p></p>';
+          refreshToolbarStatus();
+          saveStatus.textContent = 'Статус: Не сохранено';
+        }
+      });
+
+      // Отслеживаем изменение выделения, чтобы обновлять закладки кнопок активных
+      editor.addEventListener('keyup', refreshToolbarStatus);
+      editor.addEventListener('mouseup', refreshToolbarStatus);
+      editor.addEventListener('input', () => {
+        saveStatus.textContent = 'Статус: Не сохранено';
+      });
+
+      // Инициализация при загрузке страницы
+      init();
+
+      // Мобильная клавиатура может потребовать устранения сдвигов при viewport
+      window.addEventListener('resize', () => {
+        // Можно добавить дополнительные адаптивные действия, если потребуется
+      });
+    })();
+  </script>
+</body>
+</html>
+</content>
+</create_file>
