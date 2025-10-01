@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TEST</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .container {
+            margin-bottom: 20px;
+        }
+
+        button {
+            padding: 10px 15px;
+            margin: 5px;
+            border: none;
+            border-radius: 5px;
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        button:hover:not(:disabled) {
+            background: #0056b3;
+        }
+
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            background: #e9ecef;
+        }
+
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .messages {
+            height: 200px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            overflow-y: auto;
+            margin-bottom: 10px;
+            background: #f9f9f9;
+        }
+
+        .message-input {
+            display: flex;
+            gap: 10px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>TEST</h1>
+
+    <div class="status" id="status">Статус: Не подключено</div>
+
+    <div class="container">
+        <h3>1. Создание и обмен файлами .kae</h3>
+        <button onclick="createOfferAndDownload()">Создать оффер и скачать .kae</button>
+        <button onclick="importKaeFile()">Импортировать .kae файл</button>
+        <input type="file" id="fileInput" accept=".kae" style="display: none;">
+    </div>
+
+    <div class="container">
+        <h3>2. Data Channel</h3>
+        <div class="messages" id="messages"></div>
+        <div class="message-input">
+            <input type="text" id="messageInput" placeholder="Введите сообщение..." disabled>
+            <button onclick="sendMessage()" id="sendButton" disabled>Отправить</button>
+        </div>
+    </div>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const messagesDiv = document.getElementById('messages');
+        const messageInput = document.getElementById('messageInput');
+        const sendButton = document.getElementById('sendButton');
+        const fileInput = document.getElementById('fileInput');
+
+        let peerConnection = null;
+        let dataChannel = null;
+        let isOfferer = false;
+
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' },
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
+            ]
+        };
+
+        // Обработчик выбора файла
+        fileInput.onchange = async (event) => {
+            const file = event.target.files[0];
+            if (!file || !file.name.endsWith('.kae')) {
+                alert('Пожалуйста, выберите файл с расширением .kae');
+                return;
+            }
+
+            try {
+                const fileContent = await file.text();
+                const signalData = JSON.parse(fileContent);
+                await handleImportedSignal(signalData);
+            } catch (err) {
+                console.error('Ошибка при чтении файла:', err);
+                updateStatus('Ошибка при чтении файла: ' + err.message, 'error');
+            }
+        };
+
+        async function createOfferAndDownload() {
+            try {
+                isOfferer = true;
+                await createPeerConnection();
+
+                dataChannel = peerConnection.createDataChannel('fileTransferChannel', {
+                    ordered: true
+                });
+                setupDataChannel(dataChannel);
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                const offerData = {
+                    type: 'offer',
+                    sdp: offer.sdp,
+                    timestamp: new Date().toISOString()
+                };
+                downloadKaeFile(offerData, 'webrtc_offer.kae');
+                updateStatus('Оффер создан и сохранен в файл. Передайте файл партнеру.');
+
+            } catch (error) {
+                console.error('Ошибка создания оффера:', error);
+                updateStatus('Ошибка создания оффера: ' + error.message, 'error');
+            }
+        }
+        function importKaeFile() {
+            fileInput.click();
+        }
+
+        async function handleImportedSignal(signalData) {
+            try {
+                if (signalData.type === 'offer') {
+
+                    if (!peerConnection) {
+                        await createPeerConnection();
+                    }
+
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(signalData));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+
+                    const answerData = {
+                        type: 'answer',
+                        sdp: answer.sdp,
+                        timestamp: new Date().toISOString()
+                    };
+                    downloadKaeFile(answerData, 'webrtc_answer.kae');
+                    updateStatus('Ответ создан и сохранен в файл. Верните файл инициатору.');
+
+                } else if (signalData.type === 'answer') {
+                    if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(signalData));
+                        updateStatus('Ответ установлен, подключение устанавливается...');
+                    }
+                }
+            } catch (error) {
+                console.error('Ошибка обработки сигнала:', error);
+                updateStatus('Ошибка обработки сигнала: ' + error.message, 'error');
+            }
+        }
+
+        async function createPeerConnection() {
+            if (peerConnection) {
+                peerConnection.close();
+            }
+
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.ondatachannel = (event) => {
+                dataChannel = event.channel;
+                setupDataChannel(dataChannel);
+            };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                updateStatus(`ICE состояние: ${peerConnection.iceConnectionState}`);
+
+                if (peerConnection.iceConnectionState === 'connected' ||
+                    peerConnection.iceConnectionState === 'completed') {
+                    updateStatus('DataChannel подключен!', 'connected');
+                }
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('Новый ICE кандидат:', event.candidate);
+                }
+            };
+        }
+
+
+        function setupDataChannel(channel) {
+            channel.onopen = () => {
+                updateStatus('DataChannel открыт', 'connected');
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                addMessage('Система', 'DataChannel подключен!');
+            };
+
+            channel.onclose = () => {
+                updateStatus('DataChannel закрыт');
+                messageInput.disabled = true;
+                sendButton.disabled = true;
+                addMessage('Система', 'DataChannel отключен');
+            };
+
+            channel.onmessage = (event) => {
+                addMessage('Партнер', event.data);
+            };
+
+            channel.onerror = (error) => {
+                console.error('DataChannel ошибка:', error);
+                updateStatus('Ошибка DataChannel: ' + error.message, 'error');
+            };
+        }
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || !dataChannel || dataChannel.readyState !== 'open') return;
+
+            dataChannel.send(message);
+            addMessage('Я', message);
+            messageInput.value = '';
+        }
+
+        function downloadKaeFile(data, filename) {
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function addMessage(sender, message) {
+            const time = new Date().toLocaleTimeString();
+            const messageElement = document.createElement('div');
+            messageElement.innerHTML = `<strong>${sender}</strong> [${time}]: ${message}`;
+            messagesDiv.appendChild(messageElement);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function updateStatus(message, type = '') {
+            statusDiv.textContent = `Статус: ${message}`;
+            statusDiv.className = `status ${type}`;
+            console.log('Статус:', message);
+        }
+
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+
+</html>
