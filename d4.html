@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TEST</title>
+    <title>Чатик</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -76,21 +76,16 @@
             border-radius: 5px;
         }
 
-        textarea {
-            width: 100%;
-            height: 100px;
-            margin: 10px 0;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-family: monospace;
+        .ice-info {
             font-size: 12px;
+            color: #666;
+            margin-top: 5px;
         }
     </style>
 </head>
 
 <body>
-    <h1>TEST</h1>
+    <h1>Чатик</h1>
 
     <div class="status" id="status">Статус: Не подключено</div>
 
@@ -99,6 +94,7 @@
         <button onclick="createOfferAndDownload()">Создать оффер и скачать .kae</button>
         <button onclick="importKaeFile()">Импортировать .kae файл</button>
         <input type="file" id="fileInput" accept=".kae" style="display: none;">
+        <div class="ice-info" id="iceInfo">ICE кандидатов собрано: 0</div>
     </div>
 
     <div class="container">
@@ -108,6 +104,7 @@
             <input type="text" id="messageInput" placeholder="Введите сообщение..." disabled>
             <button onclick="sendMessage()" id="sendButton" disabled>Отправить</button>
         </div>
+        <button onclick="sendTestData()" id="testButton" disabled>Отправить тестовые данные (16KB)</button>
     </div>
 
     <script>
@@ -116,10 +113,14 @@
         const messageInput = document.getElementById('messageInput');
         const sendButton = document.getElementById('sendButton');
         const fileInput = document.getElementById('fileInput');
+        const iceInfo = document.getElementById('iceInfo');
+        const testButton = document.getElementById('testButton');
 
         let peerConnection = null;
         let dataChannel = null;
         let isOfferer = false;
+        let localIceCandidates = [];
+        let remoteIceCandidates = [];
 
         const configuration = {
             iceServers: [
@@ -128,25 +129,11 @@
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
                 { urls: 'stun:stun4.l.google.com:19302' },
-                {
-                    urls: 'turn:openrelay.metered.ca:80',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                {
-                    urls: 'turn:openrelay.metered.ca:443',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                {
-                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                }
+                { urls: 'stun:stun.services.mozilla.com' },
+                { urls: 'stun:stun.stunprotocol.org:3478' }
             ]
         };
 
-        // Обработчик выбора файла
         fileInput.onchange = async (event) => {
             const file = event.target.files[0];
             if (!file || !file.name.endsWith('.kae')) {
@@ -167,6 +154,7 @@
         async function createOfferAndDownload() {
             try {
                 isOfferer = true;
+                localIceCandidates = [];
                 await createPeerConnection();
 
                 dataChannel = peerConnection.createDataChannel('fileTransferChannel', {
@@ -177,11 +165,18 @@
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
 
+                updateStatus('Оффер создан, собираем ICE кандидаты...');
+
+
+                await waitForIceGathering();
+
                 const offerData = {
                     type: 'offer',
-                    sdp: offer.sdp,
+                    sdp: peerConnection.localDescription.sdp,
+                    candidates: localIceCandidates,
                     timestamp: new Date().toISOString()
                 };
+
                 downloadKaeFile(offerData, 'webrtc_offer.kae');
                 updateStatus('Оффер создан и сохранен в файл. Передайте файл партнеру.');
 
@@ -190,6 +185,7 @@
                 updateStatus('Ошибка создания оффера: ' + error.message, 'error');
             }
         }
+
         function importKaeFile() {
             fileInput.click();
         }
@@ -197,26 +193,49 @@
         async function handleImportedSignal(signalData) {
             try {
                 if (signalData.type === 'offer') {
-
                     if (!peerConnection) {
                         await createPeerConnection();
                     }
 
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(signalData));
+                    await peerConnection.setRemoteDescription(
+                        new RTCSessionDescription({ type: 'offer', sdp: signalData.sdp })
+                    );
+
+                    if (signalData.candidates && signalData.candidates.length > 0) {
+                        for (const candidate of signalData.candidates) {
+                            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                        }
+                    }
+
                     const answer = await peerConnection.createAnswer();
                     await peerConnection.setLocalDescription(answer);
 
+                    updateStatus('Ответ создан, собираем ICE кандидаты...');
+
+                    await waitForIceGathering();
+
                     const answerData = {
                         type: 'answer',
-                        sdp: answer.sdp,
+                        sdp: peerConnection.localDescription.sdp,
+                        candidates: localIceCandidates,
                         timestamp: new Date().toISOString()
                     };
+
                     downloadKaeFile(answerData, 'webrtc_answer.kae');
                     updateStatus('Ответ создан и сохранен в файл. Верните файл инициатору.');
 
                 } else if (signalData.type === 'answer') {
                     if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
-                        await peerConnection.setRemoteDescription(new RTCSessionDescription(signalData));
+                        await peerConnection.setRemoteDescription(
+                            new RTCSessionDescription({ type: 'answer', sdp: signalData.sdp })
+                        );
+
+                        if (signalData.candidates && signalData.candidates.length > 0) {
+                            for (const candidate of signalData.candidates) {
+                                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                            }
+                        }
+
                         updateStatus('Ответ установлен, подключение устанавливается...');
                     }
                 }
@@ -232,34 +251,65 @@
             }
 
             peerConnection = new RTCPeerConnection(configuration);
+            localIceCandidates = [];
 
             peerConnection.ondatachannel = (event) => {
                 dataChannel = event.channel;
                 setupDataChannel(dataChannel);
             };
 
-            peerConnection.oniceconnectionstatechange = () => {
-                updateStatus(`ICE состояние: ${peerConnection.iceConnectionState}`);
-
-                if (peerConnection.iceConnectionState === 'connected' ||
-                    peerConnection.iceConnectionState === 'completed') {
-                    updateStatus('DataChannel подключен!', 'connected');
-                }
-            };
-
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
+                    localIceCandidates.push(event.candidate.toJSON());
+                    updateIceInfo();
                     console.log('Новый ICE кандидат:', event.candidate);
                 }
             };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                const state = peerConnection.iceConnectionState;
+                updateStatus(`ICE состояние: ${state}`);
+
+                if (state === 'connected' || state === 'completed') {
+                    updateStatus('DataChannel подключен!', 'connected');
+                } else if (state === 'failed') {
+                    updateStatus('Ошибка подключения ICE', 'error');
+                }
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                updateStatus(`Состояние подключения: ${peerConnection.connectionState}`);
+            };
         }
 
+        function waitForIceGathering() {
+            return new Promise((resolve) => {
+                if (peerConnection.iceGatheringState === 'complete') {
+                    resolve();
+                    return;
+                }
+
+                const checkState = () => {
+                    if (peerConnection.iceGatheringState === 'complete') {
+                        resolve();
+                    }
+                };
+
+                peerConnection.addEventListener('icegatheringstatechange', checkState);
+
+                setTimeout(() => {
+                    peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                    resolve();
+                }, 5000);
+            });
+        }
 
         function setupDataChannel(channel) {
             channel.onopen = () => {
                 updateStatus('DataChannel открыт', 'connected');
                 messageInput.disabled = false;
                 sendButton.disabled = false;
+                testButton.disabled = false;
                 addMessage('Система', 'DataChannel подключен!');
             };
 
@@ -267,11 +317,17 @@
                 updateStatus('DataChannel закрыт');
                 messageInput.disabled = true;
                 sendButton.disabled = true;
+                testButton.disabled = true;
                 addMessage('Система', 'DataChannel отключен');
             };
 
             channel.onmessage = (event) => {
-                addMessage('Партнер', event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    addMessage('Партнер', data.message || data);
+                } catch (error) {
+                    addMessage('Партнер', event.data);
+                }
             };
 
             channel.onerror = (error) => {
@@ -284,9 +340,33 @@
             const message = messageInput.value.trim();
             if (!message || !dataChannel || dataChannel.readyState !== 'open') return;
 
-            dataChannel.send(message);
+            const messageData = {
+                message: message,
+                timestamp: new Date().toISOString(),
+                type: 'text'
+            };
+
+            dataChannel.send(JSON.stringify(messageData));
             addMessage('Я', message);
             messageInput.value = '';
+        }
+
+        function sendTestData() {
+            if (!dataChannel || dataChannel.readyState !== 'open') return;
+
+            const testData = {
+                message: 'Тестовые данные 16KB',
+                timestamp: new Date().toISOString(),
+                type: 'test',
+                data: 'A'.repeat(16 * 1024 - 200)
+            };
+
+            try {
+                dataChannel.send(JSON.stringify(testData));
+                addMessage('Система', 'Отправлены тестовые данные (~16KB)');
+            } catch (error) {
+                addMessage('Система', 'Ошибка отправки больших данных: ' + error.message);
+            }
         }
 
         function downloadKaeFile(data, filename) {
@@ -311,6 +391,10 @@
             statusDiv.textContent = `Статус: ${message}`;
             statusDiv.className = `status ${type}`;
             console.log('Статус:', message);
+        }
+
+        function updateIceInfo() {
+            iceInfo.textContent = `ICE кандидатов собрано: ${localIceCandidates.length}`;
         }
 
         messageInput.addEventListener('keypress', (e) => {
